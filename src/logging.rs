@@ -1,5 +1,8 @@
 use core::panic::PanicInfo;
-use std::{fmt::Write, panic};
+use std::{
+    fmt::{Display, Write},
+    panic,
+};
 
 use js_sys::JsString;
 use log::*;
@@ -17,7 +20,39 @@ impl log::Log for JsLog {
         true
     }
     fn log(&self, record: &log::Record<'_>) {
-        console::log_1(&JsString::from(format!("{}", record.args())));
+        let color = match record.level() {
+            Level::Error => "ff5733",
+            Level::Warn => "ffb533",
+            Level::Info => "6eff33",
+            Level::Debug => "33fff6",
+            Level::Trace => "ff33fc",
+        };
+        let args = record.clone();
+        let binding = args.args().to_string();
+        let res = binding.split(':').last();
+        match res {
+            Some(s) => match (record.file(), record.line(), record.module_path()) {
+                (Some(f), Some(l), Some(m)) => {
+                    console::log_1(&JsString::from(format!(
+                        "<font color={color}>{}</font> {m}: {f}:{l} {s}",
+                        record.level()
+                    )));
+                }
+                _ => {
+                    console::log_1(&JsString::from(format!(
+                        "<font color={color}>{}</font> {s}",
+                        record.level()
+                    )));
+                }
+            },
+            None => {
+                //well seems like cuttiing off did not work lets just do it the old way for now
+                console::log_1(&JsString::from(format!(
+                    "<font color={color} >{}</font>",
+                    record.args()
+                )));
+            }
+        }
     }
     fn flush(&self) {}
 }

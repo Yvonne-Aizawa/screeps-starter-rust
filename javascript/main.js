@@ -23,6 +23,9 @@ function console_error() {
     console.log("ERROR:", processedArgs);
     Game.notify(processedArgs);
 }
+module.exports.getMemory = function () {
+    return Memory;  
+}
 
 let halt_next_tick = false;
 
@@ -67,3 +70,4 @@ module.exports.loop = function () {
         }
     }
 }
+
