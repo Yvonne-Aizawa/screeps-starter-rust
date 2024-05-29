@@ -1,8 +1,5 @@
 use core::panic::PanicInfo;
-use std::{
-    fmt::{Display, Write},
-    panic,
-};
+use std::{fmt::Write, panic};
 
 use js_sys::JsString;
 use log::*;
@@ -29,12 +26,14 @@ impl log::Log for JsLog {
         };
         let args = record.clone();
         let binding = args.args().to_string();
-        let res = binding.split(':').last();
+        let module_path = record.module_path().unwrap_or("screeps_starter_rust");
+
+        let res = binding.split(format!("{}:", module_path).as_str()).last();
         match res {
             Some(s) => match (record.file(), record.line(), record.module_path()) {
                 (Some(f), Some(l), Some(m)) => {
                     console::log_1(&JsString::from(format!(
-                        "<font color={color}>{}</font> {m}: {f}:{l} {s}",
+                        "<font color={color}>{}</font> {m}/{f}:{l}{s}",
                         record.level()
                     )));
                 }
