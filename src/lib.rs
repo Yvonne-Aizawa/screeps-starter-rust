@@ -7,47 +7,36 @@
 // #![deny(unused_imports)]
 pub mod roles;
 mod structs;
+use std::collections::HashSet;
+use std::str::FromStr;
+
+use anyhow::anyhow;
 use gloo_utils::format::JsValueSerdeExt;
 use js_sys::{JsString, Object, Reflect};
 use log::*;
-use screeps::TextStyle;
-use screeps::Visual::Rect;
 use screeps::{
     constants::{ErrorCode, Part, ResourceType},
-    enums::StructureObject,
-    find::{self, MY_SPAWNS, SOURCES, SOURCES_ACTIVE, STRUCTURES},
+    find::{MY_CONSTRUCTION_SITES, MY_SPAWNS, SOURCES, SOURCES_ACTIVE},
     game,
     local::ObjectId,
-    look::ENERGY,
     objects::{Creep, Source, StructureController},
     prelude::*,
-    spawn, RectStyle, Room, RoomVisual, Visual,
+    ConstructionSite, RectStyle, Room, RoomVisual, SpawnOptions,
 };
+use screeps::{RoomName, TextStyle};
 use serde::{Deserialize, Serialize};
 use serde_json::Error;
-use std::{
-    cell::RefCell,
-    collections::{hash_map::Entry, HashMap, HashSet},
-};
+
 use structs::{
-    creep::{CreepExtend, CreepMemory},
-    room::RoomExtend,
-    visual::VisualExtend,
+    creep::CreepExtend,
+    memory::{GlobalMemory, RoomMemory},
 };
+use structs::{creep::CreepMemory, room::RoomExtend, visual::VisualExtend};
 use wasm_bindgen::prelude::*;
 
-use crate::{
-    roles::{builder, harvester, unknown, upgrader},
-    structs::creep::CreepType,
-};
+use crate::{roles::unknown, structs::creep::CreepType};
 
 mod logging;
-
-// this is one way to persist data between ticks within Rust's memory, as opposed to
-// keeping state in memory on game objects - but will be lost on global resets!
-// thread_local! {
-//     static CREEP_TARGETS: RefCell<HashMap<String, CreepTarget>> = RefCell::new(HashMap::new());
-// }
 
 static INIT_LOGGING: std::sync::Once = std::sync::Once::new();
 
@@ -59,7 +48,265 @@ enum CreepTarget {
     Upgrade(ObjectId<StructureController>),
     Harvest(ObjectId<Source>),
     Spawn(ObjectId<screeps::StructureSpawn>),
-    None(),
+    Build(ObjectId<ConstructionSite>),
+}
+impl CreepTarget {
+    fn run(self, creep: &Creep) -> bool {
+        match self {
+            CreepTarget::Build(object_id) => match object_id.resolve() {
+                Some(target) => {
+                    let res = creep.build(&target);
+                    if let Err(errorcode) = res {
+                        match errorcode {
+                            ErrorCode::NotFound => {
+                                let res = creep.set_target(None);
+                                match res {
+                                    Err(e) => {
+                                        error!("could not set target: {e}");
+                                        return false;
+                                    }
+                                    Ok(_) => {
+                                        trace!("sucessfully set target of creep: {}", creep.name());
+                                        return true;
+                                    }
+                                }
+                            }
+                            ErrorCode::NotEnough => {
+                                let res = creep.set_target(None);
+                                match res {
+                                    Err(e) => {
+                                        error!("could not set target: {e}");
+                                        return false;
+                                    }
+                                    Ok(_) => {
+                                        trace!("sucessfully set target of creep: {}", creep.name());
+                                        return true;
+                                    }
+                                }
+                            }
+                            ErrorCode::NotInRange => {
+                                let res = creep.move_to(target);
+                                match res {
+                                    Err(e) => {
+                                        error!("could not set target: {e:?}");
+                                        return false;
+                                    }
+                                    Ok(_) => {
+                                        trace!("sucessfully set target of creep: {}", creep.name());
+                                        return true;
+                                    }
+                                }
+                            }
+                            _e => {
+                                error!("error building {_e:?}");
+                                return false;
+                            }
+                        };
+                    };
+                    return false;
+                }
+                None => {
+                    return false;
+                }
+            },
+            CreepTarget::Harvest(object_id) => {
+                //kay we have a target lets move to it.
+                if creep.is_full() {
+                    let res = creep.set_target(None);
+                    match res {
+                        Err(e) => {
+                            error!("could not set target: {e}");
+                            return false;
+                        }
+                        Ok(_) => {
+                            trace!("sucessfully set target of creep: {}", creep.name());
+                            return true;
+                        }
+                    }
+                }
+                match object_id.resolve() {
+                    Some(source) => {
+                        let res = creep.harvest(&source);
+                        match res {
+                            Err(e) => match e {
+                                ErrorCode::Full => {}
+                                ErrorCode::NotInRange => {
+                                    let res = creep.move_to(source);
+                                    match res {
+                                        Err(e) => {
+                                            error!("could not set target: {e:?}");
+                                            return false;
+                                        }
+                                        Ok(_) => {
+                                            trace!(
+                                                "sucessfully set target of creep: {}",
+                                                creep.name()
+                                            );
+                                            return true;
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    error!("error while harvesting: {e:?}");
+                                    return true;
+                                }
+                            },
+                            Ok(_) => {
+                                return true;
+                            }
+                        }
+                    }
+                    None => {
+                        return false;
+                    }
+                };
+                return false;
+            }
+            CreepTarget::Spawn(object_id) => match object_id.resolve() {
+                Some(spawn) => {
+                    let res = creep.transfer(&spawn, ResourceType::Energy, creep.get_energy());
+                    match res {
+                        Ok(_) => {
+                            let res = creep.set_target(None);
+                            match res {
+                                Err(e) => {
+                                    error!("could not set target: {e}");
+                                    return false;
+                                }
+                                Ok(_) => {
+                                    trace!("sucessfully set target of creep: {}", creep.name());
+                                    return true;
+                                }
+                            }
+                        }
+                        Err(error) => match error {
+                            ErrorCode::NotEnough => {
+                                let res = creep.set_target(Some(CreepTarget::Harvest(
+                                    creep
+                                        .room()
+                                        .unwrap()
+                                        .get_active_sources()
+                                        .first()
+                                        .unwrap()
+                                        .id(),
+                                )));
+                                match res {
+                                    Err(e) => {
+                                        error!("could not set target: {e}");
+                                        return false;
+                                    }
+                                    Ok(_) => {
+                                        trace!("sucessfully set target of creep: {}", creep.name());
+                                        return true;
+                                    }
+                                }
+                            }
+
+                            ErrorCode::Full => {
+                                let res = creep.set_target(Some(CreepTarget::Upgrade(
+                                    creep.room().unwrap().controller().unwrap().id(),
+                                )));
+                                match res {
+                                    Err(e) => {
+                                        error!("could not set target: {e}");
+                                        return false;
+                                    }
+                                    Ok(_) => {
+                                        trace!("sucessfully set target of creep: {}", creep.name());
+                                        return true;
+                                    }
+                                }
+                            }
+                            ErrorCode::NotInRange => {
+                                let res = creep.move_to(spawn);
+                                match res {
+                                    Err(e) => {
+                                        error!("could not move to spawn: {e:?}");
+                                        return false;
+                                    }
+                                    Ok(_) => {
+                                        trace!("sucessfully set target of creep: {}", creep.name());
+                                        return true;
+                                    }
+                                }
+                            }
+                            _ => {
+                                error!("some kind of error happened: {error:?}");
+                                return false;
+                            }
+                        },
+                    }
+                }
+                None => {
+                    error!("spawn not set?");
+                    return false;
+                }
+            },
+            CreepTarget::Upgrade(object_id) => {
+                match object_id.resolve() {
+                    Some(controller) => {
+                        let res = creep.upgrade_controller(&controller);
+                        match res {
+                            Ok(_) => {
+                                trace!("we upgraded the controller bois");
+                                return true;
+                            }
+                            Err(error) => {
+                                match error {
+                                    ErrorCode::NotEnough => {
+                                        let res = creep.set_target(None);
+                                        match res {
+                                            Err(e) => {
+                                                error!("could not set target: {e}");
+                                                return false;
+                                            }
+                                            Ok(_) => {
+                                                trace!(
+                                                    "sucessfully set target of creep: {}",
+                                                    creep.name()
+                                                );
+                                                return true;
+                                            }
+                                        }
+                                    } // maybe get some energy?
+                                    ErrorCode::NotInRange => {
+                                        let res = creep.move_to(controller);
+                                        match res {
+                                            Err(e) => {
+                                                error!("could not move to:  {e:?}");
+                                                return false;
+                                            }
+                                            Ok(_) => {
+                                                trace!(
+                                                    "creep moved to controller {}",
+                                                    creep.name()
+                                                );
+                                                return true;
+                                            }
+                                        }
+                                    } // fucking move to it
+                                    ErrorCode::Busy => {
+                                        trace!("seems like creep is spawning");
+                                        return false;
+                                    }
+                                    _ => {
+                                        error!(
+                                            "unknown error for upgrading the controller: {error:?}"
+                                        );
+                                        return false;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        error!("seems like the controller does not exist");
+                        return false;
+                    }
+                }
+            }
+        }
+    }
 }
 
 // add wasm_bindgen to any function you would like to expose for call from js
@@ -81,13 +328,10 @@ pub fn game_loop() {
         match creep.get_type() {
             Ok(res) => match res {
                 Some(creep_type) => match creep_type {
-                    CreepType::Unknown => unknown::run(creep),
-                    CreepType::Builder => builder::run(creep),
-                    CreepType::Upgrader => upgrader::run(creep),
-                    CreepType::Harvester => harvester::run(creep),
+                    t => t.run(creep),
                 },
                 None => {
-                    creep.set_type(Some(CreepType::Unknown));
+                    unknown::run(creep);
                 }
             },
             Err(e) => {
@@ -110,7 +354,14 @@ pub fn game_loop() {
                 // create a unique name, spawn.
                 let name_base = game::time();
                 let name = format!("{}-{}", name_base, additional);
-                match spawn.spawn_creep(&body, &name) {
+                let memory = JsValue::from_serde(
+                    &CreepMemory::default()
+                        .set_homeroom(Some(spawn.room().unwrap()))
+                        .set_type(Some(CreepType::Upgrader)),
+                )
+                .unwrap();
+                let opts = SpawnOptions::default().memory(memory);
+                match spawn.spawn_creep_with_options(&body, &name, &opts) {
                     Ok(()) => additional += 1,
                     Err(e) => warn!("couldn't spawn: {:?}", e),
                 }
@@ -128,9 +379,10 @@ pub fn game_loop() {
             info!("cleaned memory")
         }
     }
-    let my_Rooms = game::rooms().entries().filter(|x| x.1.is_mine());
-    for (r, n) in my_Rooms {
-        draw_ui(n)
+    let my_rooms = game::rooms().entries().filter(|x| x.1.is_mine());
+    for (_n, r) in my_rooms {
+        draw_ui(&r);
+        update_room_mem(r);
     }
 
     info!(
@@ -138,7 +390,30 @@ pub fn game_loop() {
         game::cpu::get_used(),
         game::cpu::limit(),
         game::cpu::tick_limit()
-    )
+    );
+    update_stats()
+}
+fn update_room_mem(room: Room) {
+    let memory = RoomMemory {
+        ..Default::default()
+    };
+    let res = &room.clone().set_memory_obj(memory);
+    match res {
+        Err(e) => {
+            error!("could not set room memory: {e}");
+        }
+        Ok(_) => {
+            trace!("memory set of {}", room.name());
+        }
+    }
+}
+fn update_stats() {
+    // get global mem
+    let mem = GlobalMemory::get();
+    match mem {
+        Err(e) => error!("{e}"),
+        Ok(o) => o.update_stats(),
+    }
 }
 
 pub fn clean_memory() -> Result<(), Box<dyn std::error::Error>> {
@@ -177,6 +452,124 @@ pub fn clean_memory() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+impl RoomExtend for Room {
+    fn get_sources(self) -> Vec<Source> {
+        self.find(SOURCES, None)
+    }
+    fn get_memory_obj(self) -> anyhow::Result<RoomMemory, anyhow::Error> {
+        match self.memory().into_serde() {
+            Err(e) => {
+                return Err(anyhow!(
+                    "could not convert jsvalue to room memory struct{e}"
+                ))
+            }
+            Ok(o) => Ok(o),
+        }
+    }
+    fn get_controller_id(&self) -> Option<ObjectId<StructureController>> {
+        match self.controller() {
+            Some(s) => Some(s.id()),
+            None => None,
+        }
+    }
+    fn get_spawn(self) -> Vec<screeps::StructureSpawn> {
+        self.find(MY_SPAWNS, None)
+    }
+    fn is_mine(&self) -> bool {
+        match self.controller() {
+            Some(c) => c.my(),
+            None => false,
+        }
+    }
+    fn get_active_sources(self) -> Vec<Source> {
+        self.find(SOURCES_ACTIVE, None)
+    }
+    fn get_construction_sites(self) -> Vec<ConstructionSite> {
+        self.find(MY_CONSTRUCTION_SITES, None)
+    }
+
+    fn set_memory_obj(self, memory: RoomMemory) -> anyhow::Result<(), anyhow::Error> {
+        let val = JsValue::from_serde(&memory);
+        match val {
+            Ok(o) => {
+                Self::set_memory(&self, &o);
+
+                return Ok(());
+            }
+            Err(e) => {
+                error!("error serializing JsValue to CreepMemory: {}", e);
+                return Err(anyhow!("error serializing JsValue to CreepMemory: {}", e));
+            }
+        }
+    }
+}
+
+impl VisualExtend for RoomVisual {
+    fn draw_progress_bar(
+        self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        procent: f32,
+        front_style: Option<RectStyle>,
+        back_style: Option<RectStyle>,
+        label: Option<String>,
+    ) -> Self {
+        self.rect(
+            x + 0.1,
+            y + 0.1,
+            (width - 0.2) * procent,
+            height - 0.2,
+            front_style,
+        );
+        self.rect(x, y, width, height, back_style);
+        if let Some(l) = label {
+            let style = Some(
+                TextStyle::default()
+                    .align(screeps::TextAlign::Left)
+                    .font(0.5),
+            );
+            self.text(x, y, l, style)
+        }
+        self
+    }
+}
+
+fn draw_ui(room: &Room) {
+    trace!("drawing ui for {}", room.name());
+    let procent = (game::cpu::get_used() / game::cpu::limit() as f64) as f32;
+    let color = match procent {
+        0.0..0.1 => "green",
+        0.1..0.5 => "yellow",
+        0.5..0.9 => "orange",
+        0.9..1.0 => "red",
+        _ => "blue",
+    };
+    let spawns = &room.clone().get_spawn();
+    match spawns.first() {
+        Some(spawn) => match spawn.spawning() {
+            Some(s) => room.visual().text(1.0, 1.0, format!("{}", s.name()), None),
+            None => {}
+        },
+        None => {
+            warn!("no spawns in room: {}", &room.name())
+        }
+    }
+    let front_style = Some(RectStyle::default().fill(color));
+    let back_style = Some(RectStyle::default().fill("black"));
+    room.visual().draw_progress_bar(
+        1.0,
+        1.0,
+        10.0,
+        0.5,
+        procent,
+        front_style,
+        back_style,
+        Some("cpu usage".to_string()),
+    );
+}
+
 // implementations
 #[allow(dead_code)]
 
@@ -190,6 +583,31 @@ impl CreepExtend for Creep {
             }
         };
         return Ok(creeptype._type);
+    }
+    fn get_home_room(&self) -> anyhow::Result<Option<Room>, anyhow::Error> {
+        match self.get_memory_obj() {
+            Err(e) => Err(anyhow!("could not read memory: {e}")),
+            Ok(o) => {
+                let homeroom = o.homeroom;
+                match homeroom {
+                    Some(r) => {
+                        let roomname = RoomName::from_str(&r);
+                        match roomname {
+                            Err(e) => {
+                                return Err(anyhow!("room not found? {e}"));
+                            }
+                            Ok(o) => {
+                                return Ok(game::rooms().get(o));
+                            }
+                        }
+                        // return Ok(game::rooms().get()?);
+                    }
+                    None => {
+                        return Err(anyhow!("room not defined"));
+                    }
+                };
+            }
+        }
     }
     fn has_room(&self) -> bool {
         self.store().get_free_capacity(None) != 0
@@ -290,139 +708,23 @@ impl CreepExtend for Creep {
             Ok(o) => match o {
                 Some(t) => {
                     match t {
-                        CreepTarget::Upgrade(target) => {
-                            match target.resolve() {
-                                Some(controller) => {
-                                    let res = self.upgrade_controller(&controller);
-                                    match res {
-                                        Ok(_) => {
-                                            trace!("we upgraded the controller bois");
-                                            return true;
-                                        }
-                                        Err(error) => {
-                                            match error {
-                                                ErrorCode::NotEnough => {
-                                                    self.set_target(Some(CreepTarget::None()));
-                                                    // self.set_target(Some(CreepTarget::Harvest(
-                                                    //     self.room()
-                                                    //         .unwrap()
-                                                    //         .get_active_sources()
-                                                    //         .first()
-                                                    //         .unwrap()
-                                                    //         .id(),
-                                                    // )));
-                                                } // maybe get some energy?
-                                                ErrorCode::NotInRange => {
-                                                    self.move_to(controller);
-                                                } // fucking move to it
-                                                _ => {
-                                                    error!("unknown error for upgrading the controller: {error:?}")
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                None => {
-                                    error!("seems like the controller does not exist");
-                                    return false;
-                                }
-                            }
-                        }
-                        CreepTarget::Harvest(target) => {
-                            //kay we have a target lets move to it.
-                            if self.is_full() {
-                                self.set_target(Some(CreepTarget::None()));
-                                // if (game::time() % 2) == 0 {
-                                //     self.set_target(Some(CreepTarget::Upgrade(
-                                //         self.room().unwrap().controller().unwrap().id(),
-                                //     )));
-                                // } else {
-                                //     self.set_target(Some(CreepTarget::Spawn(
-                                //         self.room().unwrap().get_spawn().first().unwrap().id(),
-                                //     )));
-                                // }
-                            }
-                            match target.resolve() {
-                                Some(source) => {
-                                    let res = self.harvest(&source);
-                                    match res {
-                                        Err(e) => match e {
-                                            ErrorCode::Full => {}
-                                            ErrorCode::NotInRange => {
-                                                self.move_to(source);
-                                            }
-                                            _ => {
-                                                error!("error while harvesting: {e:?}")
-                                            }
-                                        },
-                                        Ok(_) => {}
-                                    }
-                                }
-                                None => {}
-                            };
-                        }
-                        CreepTarget::Spawn(s) => match s.resolve() {
-                            Some(spawn) => {
-                                let res = self.transfer(
-                                    &spawn,
-                                    ResourceType::Energy,
-                                    Some(
-                                        self.store().get_used_capacity(Some(ResourceType::Energy)),
-                                    ),
-                                );
-                                match res {
-                                    Ok(_) => {
-                                        self.set_target(Some(CreepTarget::None()));
-                                        // self.set_target(Some(CreepTarget::Harvest(
-                                        //     self.room()
-                                        //         .unwrap()
-                                        //         .get_active_sources()
-                                        //         .first()
-                                        //         .unwrap()
-                                        //         .id(),
-                                        // )));
-                                    }
-                                    Err(error) => match error {
-                                        ErrorCode::NotEnough => {
-                                            self.set_target(Some(CreepTarget::Harvest(
-                                                self.room()
-                                                    .unwrap()
-                                                    .get_active_sources()
-                                                    .first()
-                                                    .unwrap()
-                                                    .id(),
-                                            )));
-                                        }
-
-                                        ErrorCode::Full => {
-                                            self.set_target(Some(CreepTarget::Upgrade(
-                                                self.room().unwrap().controller().unwrap().id(),
-                                            )));
-                                        }
-                                        ErrorCode::NotInRange => {
-                                            self.move_to(spawn);
-                                        }
-                                        _ => {
-                                            error!("some kind of error happened: {error:?}");
-                                        }
-                                    },
-                                }
-                            }
-                            None => {
-                                error!("spawn not set?")
-                            }
-                        },
-                        CreepTarget::None() => {
-                            warn!("creep has no target set");
-                            return false;
-                        }
+                        t => t.run(self),
                     };
                 }
                 None => {
-                    self.set_target(Some(CreepTarget::Upgrade(
+                    let res = self.set_target(Some(CreepTarget::Upgrade(
                         self.room().unwrap().controller().unwrap().id(),
                     )));
-                    return false;
+                    match res {
+                        Err(e) => {
+                            error!("could not set target: {e}");
+                            return false;
+                        }
+                        Ok(_) => {
+                            trace!("sucessfully set target of creep: {}", self.name());
+                            return true;
+                        }
+                    }
                 }
             },
             Err(e) => {
@@ -431,79 +733,39 @@ impl CreepExtend for Creep {
         }
         return false;
     }
-}
 
-impl RoomExtend for Room {
-    fn get_sources(self) -> Vec<Source> {
-        self.find(SOURCES, None)
-    }
-    fn get_spawn(self) -> Vec<screeps::StructureSpawn> {
-        self.find(MY_SPAWNS, None)
-    }
-    fn is_mine(&self) -> bool {
-        match self.controller() {
-            Some(c) => c.my(),
-            None => false,
+    fn total_of_type(&self, homeroom: bool) -> anyhow::Result<u32, anyhow::Error> {
+        match self.get_type() {
+            Ok(t) => match t {
+                Some(s) => match s.amount_alive(match homeroom {
+                    false => None,
+                    true => self.get_home_room().unwrap_or_default(),
+                }) {
+                    Err(e) => Err(anyhow!(e.to_string())),
+                    Ok(o) => Ok(o),
+                },
+                None => Err(anyhow!("creep has no type")),
+            },
+            Err(e) => {
+                warn!("creep has no type cant get amount of creeps");
+                return Err(anyhow!("{}", e.to_string()));
+            }
         }
     }
-    fn get_active_sources(self) -> Vec<Source> {
-        self.find(SOURCES_ACTIVE, None)
-    }
-}
 
-impl VisualExtend for RoomVisual {
-    fn draw_progress_bar(
-        self,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        procent: f32,
-        front_style: Option<RectStyle>,
-        back_style: Option<RectStyle>,
-        label: Option<String>,
-    ) -> Self {
-        self.rect(
-            x + 0.1,
-            y + 0.1,
-            (width - 0.2) * procent,
-            height - 0.2,
-            front_style,
-        );
-        self.rect(x, y, width, height, back_style);
-        if let Some(l) = label {
-            let style = Some(
-                TextStyle::default()
-                    .align(screeps::TextAlign::Left)
-                    .font(0.5),
-            );
-            self.text(x, y, l, style)
+    fn get_energy(&self) -> Option<u32> {
+        let total = self.store().get_used_capacity(Some(ResourceType::Energy));
+        match total {
+            0 => None,
+            _t => Some(_t),
         }
-        self
     }
-}
 
-fn draw_ui(room: Room) {
-    trace!("drawing ui for {}", room.name());
-    let procent = (game::cpu::get_used() / game::cpu::limit() as f64) as f32;
-    warn!("{procent}");
-    let color = match procent {
-        0.0..0.1 => "green",
-        0.1..0.5 => "yellow",
-        0.5..0.9 => "orange",
-        0.9..1.0 => "red",
-        _ => "blue",
-    };
-    let front_style = Some(RectStyle::default().fill(color));
-    let back_style = Some(RectStyle::default().fill("black"));
-    room.visual().draw_progress_bar(
-        1.0,
-        1.0,
-        10.0,
-        0.5,
-        procent,
-        front_style,
-        back_style,
-        Some("cpu usage".to_string()),
-    );
+    fn has_resource(&self, resourcetype: ResourceType) -> Option<u32> {
+        let total = self.store().get_used_capacity(Some(resourcetype));
+        match total {
+            0 => None,
+            _t => Some(_t),
+        }
+    }
 }

@@ -1,10 +1,11 @@
-use log::{error, info};
-use screeps::{Creep, HasStore};
-use serde::Serialize;
+use log::error;
+use screeps::Creep;
 
 use crate::{structs::creep::CreepType, CreepExtend};
 
 pub fn run(creep: Creep) {
-    creep.say("upgrading", false);
-    creep.set_type(Some(CreepType::Upgrader));
+    let res = creep.set_type(Some(CreepType::Upgrader));
+    if let Err(err) = res {
+        error!("error setting creep type {err}")
+    }
 }
