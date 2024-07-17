@@ -1,5 +1,8 @@
 use core::panic::PanicInfo;
-use std::{fmt::Write, panic};
+use std::{
+    fmt::Write,
+    panic::{self, PanicHookInfo},
+};
 
 use js_sys::JsString;
 use log::*;
@@ -26,7 +29,7 @@ impl log::Log for JsLog {
         };
         let args = record.clone();
         let binding = args.args().to_string();
-        let module_path = record.module_path().unwrap_or("screeps_starter_rust");
+        let module_path = record.module_path().unwrap_or("main");
 
         let res = binding.split(format!("{}:", module_path).as_str()).last();
         match res {
@@ -105,7 +108,7 @@ extern "C" {
     fn stack_trace_limit(size: f32);
 }
 
-fn panic_hook(info: &PanicInfo) {
+fn panic_hook(info: &PanicHookInfo<'_>) {
     // import JS Error API to get backtrace info (backtraces don't work in wasm)
     // Node 8 does support this API: https://nodejs.org/docs/latest-v8.x/api/errors.html#errors_error_stack
 

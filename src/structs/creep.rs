@@ -1,9 +1,9 @@
 use anyhow::anyhow;
-use log::error;
-use screeps::{game, Creep, HasId, MaybeHasId, ResourceType, Room};
+use log::{debug, error};
+use screeps::{game, Creep, ErrorCode, HasId, HasPosition, MaybeHasId, ResourceType, Room};
 use serde::{Deserialize, Serialize};
 use serde_json::Error;
-use std::fmt::Display;
+use std::{fmt::Display, io::ErrorKind};
 
 use crate::CreepTarget;
 
@@ -82,22 +82,14 @@ impl CreepType {
                     creep.set_target(Some(crate::CreepTarget::Harvest(
                         creep
                             .room()
-                            .unwrap()
-                            .get_active_sources()
-                            .first()
-                            .unwrap()
-                            .id(),
+                            .unwrap().get_best_source().unwrap().id()
                     )));
                 } else {
-                    creep.set_target(Some(crate::CreepTarget::Harvest(
-                        creep
-                            .room()
-                            .unwrap()
-                            .get_active_sources()
-                            .first()
-                            .unwrap()
-                            .id(),
-                    )));
+                    // creep.set_target(Some(crate::CreepTarget::Harvest(
+                    //     creep
+                    //         .room()
+                    //         .unwrap().get_best_source().unwrap().id()
+                    // )));
                 }
             }
             CreepType::Upgrader => {
@@ -108,35 +100,17 @@ impl CreepType {
                     if let Err(err) = res {
                         error!("error setting creep_target: {err}")
                     }
-                    // creep.set_target(Some(crate::CreepTarget::Spawn(
-                    //     creep.room().unwrap().get_spawn().first().unwrap().id(),
-                    // )));
-                } else if creep.is_empty() {
+                } else if creep.is_empty() && creep.get_target().unwrap().is_none() {
                     let res = creep.set_target(Some(crate::CreepTarget::Harvest(
                         creep
-                            .room()
-                            .unwrap()
-                            .get_active_sources()
-                            .first()
-                            .unwrap()
-                            .id(),
+                        .room()
+                        .unwrap().get_best_source().unwrap().id()
                     )));
                     if let Err(err) = res {
                         error!("error setting creep_target: {err}")
                     }
                 } else {
-                    let res = creep.set_target(Some(crate::CreepTarget::Harvest(
-                        creep
-                            .room()
-                            .unwrap()
-                            .get_active_sources()
-                            .first()
-                            .unwrap()
-                            .id(),
-                    )));
-                    if let Err(err) = res {
-                        error!("error setting creep_target: {err}")
-                    }
+                    debug!("nothing needs to happen");
                 }
             }
             CreepType::Harvester => {
@@ -204,4 +178,7 @@ pub trait CreepExtend {
     fn set_memory_obj(&self, memory: CreepMemory) -> Result<(), Error>;
     fn set_working(&self, working: bool) -> Result<(), Error>;
     fn get_working(&self) -> Result<Option<bool>, Error>;
+    fn b_move<T>(&self, target: T) -> Result<(), ErrorCode>
+    where
+        T: HasPosition;
 }

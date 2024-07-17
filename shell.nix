@@ -13,5 +13,5 @@ mkShell {
     sqlite
     (rust-bin.fromRustupToolchainFile ./rust-toolchain.toml)
   ];
-  RUST_LOG = "info";
+  RUST_LOG = "INFO";
 }

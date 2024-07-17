@@ -193,23 +193,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "screeps-starter-rust"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "fern",
- "gloo-utils",
- "js-sys",
- "log",
- "screeps-game-api",
- "serde",
- "serde_json",
- "wasm-bindgen",
- "wasm-bindgen-test",
- "web-sys",
-]
-
-[[package]]
 name = "serde"
 version = "1.0.202"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -378,4 +361,21 @@ checksum = "77afa9a11836342370f4817622a2f0f418b134426d91a82dfb48f532d2ec13ef"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "yvonne_screeps"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "fern",
+ "gloo-utils",
+ "js-sys",
+ "log",
+ "screeps-game-api",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-test",
+ "web-sys",
 ]

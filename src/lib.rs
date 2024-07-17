@@ -7,6 +7,7 @@
 // #![deny(unused_imports)]
 pub mod roles;
 mod structs;
+use core::error;
 use std::collections::HashSet;
 use std::str::FromStr;
 
@@ -15,13 +16,7 @@ use gloo_utils::format::JsValueSerdeExt;
 use js_sys::{JsString, Object, Reflect};
 use log::*;
 use screeps::{
-    constants::{ErrorCode, Part, ResourceType},
-    find::{MY_CONSTRUCTION_SITES, MY_SPAWNS, SOURCES, SOURCES_ACTIVE},
-    game,
-    local::ObjectId,
-    objects::{Creep, Source, StructureController},
-    prelude::*,
-    ConstructionSite, RectStyle, Room, RoomVisual, SpawnOptions,
+    constants::{ErrorCode, Part, ResourceType}, find::{self, MY_CONSTRUCTION_SITES, MY_SPAWNS, SOURCES, SOURCES_ACTIVE}, game, local::ObjectId, look, objects::{Creep, Source, StructureController}, pathfinder::{self, MultiRoomCostResult, SearchOptions}, prelude::*, CircleStyle, ConstructionSite, CostMatrix, MoveToOptions, RectStyle, Room, RoomVisual, SpawnOptions
 };
 use screeps::{RoomName, TextStyle};
 use serde::{Deserialize, Serialize};
@@ -30,6 +25,8 @@ use serde_json::Error;
 use structs::{
     creep::CreepExtend,
     memory::{GlobalMemory, RoomMemory},
+    room,
+    source::SourceExtend,
 };
 use structs::{creep::CreepMemory, room::RoomExtend, visual::VisualExtend};
 use wasm_bindgen::prelude::*;
@@ -85,7 +82,7 @@ impl CreepTarget {
                                 }
                             }
                             ErrorCode::NotInRange => {
-                                let res = creep.move_to(target);
+                                let res = creep.b_move(target);
                                 match res {
                                     Err(e) => {
                                         error!("could not set target: {e:?}");
@@ -112,6 +109,7 @@ impl CreepTarget {
             CreepTarget::Harvest(object_id) => {
                 //kay we have a target lets move to it.
                 if creep.is_full() {
+                    //we are full so lets set the target to none
                     let res = creep.set_target(None);
                     match res {
                         Err(e) => {
@@ -126,25 +124,46 @@ impl CreepTarget {
                 }
                 match object_id.resolve() {
                     Some(source) => {
+                        // creep.room().unwrap().visual().line((creep.pos().x().0.into(), creep.pos().y().0.into()), (source.pos().x().0.into(), source.pos().y().0.into()), None);
+
                         let res = creep.harvest(&source);
                         match res {
                             Err(e) => match e {
                                 ErrorCode::Full => {}
                                 ErrorCode::NotInRange => {
-                                    let res = creep.move_to(source);
+                                    let res = creep.b_move(source);
+
                                     match res {
                                         Err(e) => {
-                                            error!("could not set target: {e:?}");
+                                            match e {
+                                                ErrorCode::NoPath => {
+                                                    error!("no path to target");
+                                                    let best = creep.room().unwrap().get_best_source();
+                                                    if let Some(source) = best {
+                                                        let res = creep.set_target(Some(CreepTarget::Harvest(source.id())));
+                                                    }
+                                                    return false;
+                                                }
+                                                _e => error!("error moving: {} {e:?}", creep.name())
+                                            }
+
                                             return false;
                                         }
                                         Ok(_) => {
-                                            trace!(
-                                                "sucessfully set target of creep: {}",
-                                                creep.name()
-                                            );
+                                            //is there a way to see if a path is avalibe?
+                                            trace!("moved to target: {}", creep.name());
                                             return true;
                                         }
                                     }
+                                }
+                                ErrorCode::NoPath => {
+                                    error!("no path to target");
+                                    let best = creep.room().unwrap().get_best_source();
+                                    error!("best source: {:?}", best);
+                                    if let Some(source) = best {
+                                        creep.set_target(Some(CreepTarget::Harvest(source.id())));
+                                    }
+                                    return false;
                                 }
                                 _ => {
                                     error!("error while harvesting: {e:?}");
@@ -181,15 +200,8 @@ impl CreepTarget {
                         }
                         Err(error) => match error {
                             ErrorCode::NotEnough => {
-                                let res = creep.set_target(Some(CreepTarget::Harvest(
-                                    creep
-                                        .room()
-                                        .unwrap()
-                                        .get_active_sources()
-                                        .first()
-                                        .unwrap()
-                                        .id(),
-                                )));
+                                let res = creep.set_target(Some(CreepTarget::Harvest(creep.room().unwrap().get_best_source().unwrap().id()))
+                                );
                                 match res {
                                     Err(e) => {
                                         error!("could not set target: {e}");
@@ -218,7 +230,7 @@ impl CreepTarget {
                                 }
                             }
                             ErrorCode::NotInRange => {
-                                let res = creep.move_to(spawn);
+                                let res = creep.b_move(spawn);
                                 match res {
                                     Err(e) => {
                                         error!("could not move to spawn: {e:?}");
@@ -270,7 +282,7 @@ impl CreepTarget {
                                         }
                                     } // maybe get some energy?
                                     ErrorCode::NotInRange => {
-                                        let res = creep.move_to(controller);
+                                        let res = creep.b_move(controller);
                                         match res {
                                             Err(e) => {
                                                 error!("could not move to:  {e:?}");
@@ -315,7 +327,7 @@ impl CreepTarget {
 pub fn game_loop() {
     INIT_LOGGING.call_once(|| {
         // show all output of Info level, adjust as needed
-        logging::setup_logging(logging::Trace);
+        logging::setup_logging(logging::Info);
     });
 
     debug!("loop starting! CPU: {:.2}", game::cpu::get_used());
@@ -382,7 +394,14 @@ pub fn game_loop() {
     let my_rooms = game::rooms().entries().filter(|x| x.1.is_mine());
     for (_n, r) in my_rooms {
         draw_ui(&r);
-        update_room_mem(r);
+
+        update_room_mem(&r);
+        let best = r.get_best_source().unwrap().pos();
+        let style = CircleStyle::default().fill("red");
+        r.visual().circle(best.x().0 as f32, best.y().0 as f32, Some(style));
+        for source in r.clone().get_sources().iter() {
+            draw_energy(source, &r);
+        }
     }
 
     info!(
@@ -393,7 +412,7 @@ pub fn game_loop() {
     );
     update_stats()
 }
-fn update_room_mem(room: Room) {
+fn update_room_mem(room: &Room) {
     let memory = RoomMemory {
         ..Default::default()
     };
@@ -502,6 +521,26 @@ impl RoomExtend for Room {
             }
         }
     }
+    fn get_best_source(&self) -> Option<Source> {
+        let room_sources = self.clone().get_sources();
+        let mut max_slots = 0;
+        let mut best_source_id: Option<Source> = None;
+
+        for source in room_sources.iter() {
+            let slots = <screeps::Source as Clone>::clone(&source)
+                .get_free_slots()
+                .len();
+            if slots > max_slots {
+                max_slots = slots;
+                best_source_id = Some(source.clone()); // Assuming `.id()` returns a unique identifier for the source
+            }
+        }
+        let style = CircleStyle::default().fill("blue");
+        self.visual().circle(best_source_id.clone().unwrap().pos().x().0 as f32, best_source_id.clone().unwrap().pos().y().0 as f32, Some(style));
+
+
+        best_source_id
+    }
 }
 
 impl VisualExtend for RoomVisual {
@@ -568,6 +607,14 @@ fn draw_ui(room: &Room) {
         back_style,
         Some("cpu usage".to_string()),
     );
+}
+fn draw_energy(source: &Source, room: &Room) {
+    trace!("drawing energy for {}", room.name());
+    let slots = source.clone().get_free_slots();
+    for i in slots {
+        room.visual()
+            .circle(i.pos().x().0 as f32, i.pos().y().0 as f32, None)
+    }
 }
 
 // implementations
@@ -768,4 +815,32 @@ impl CreepExtend for Creep {
             _t => Some(_t),
         }
     }
+
+    fn b_move<T>(&self, target: T) -> Result<(), ErrorCode>
+    where
+        T: HasPosition,
+    {
+        let options = SearchOptions::default().room_callback(room_call);
+
+        ///lets find the path
+        let res = pathfinder::search(self.pos(), target.pos(), 1, Some(options));
+        if res.incomplete() {
+            return Err(ErrorCode::NoPath);
+        }
+        self.move_by_path(&res.opaque_path())
+    }
+}
+fn room_call(room: RoomName) -> MultiRoomCostResult {
+    let room = game::rooms().get(room);
+    if let Some(room) = room {
+        let cost = CostMatrix::new();
+        let creeps = room.find(find::CREEPS, None);
+        for creep in creeps {
+            let pos = creep.pos();
+            cost.set(u8::from(pos.x()), u8::from(pos.y()), 255);
+        }
+        let test = MultiRoomCostResult::CostMatrix(cost);
+        return test;
+    }
+    MultiRoomCostResult::Default
 }

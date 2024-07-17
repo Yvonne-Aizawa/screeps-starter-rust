@@ -10,4 +10,5 @@ pub trait RoomExtend {
     fn is_mine(&self) -> bool;
     fn get_construction_sites(self) -> Vec<ConstructionSite>;
     fn get_controller_id(&self) -> Option<ObjectId<StructureController>>;
+    fn get_best_source(&self) -> Option<Source>;
 }
