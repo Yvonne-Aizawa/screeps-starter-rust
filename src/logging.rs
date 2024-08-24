@@ -1,4 +1,3 @@
-use core::panic::PanicInfo;
 use std::{
     fmt::Write,
     panic::{self, PanicHookInfo},
@@ -33,10 +32,10 @@ impl log::Log for JsLog {
 
         let res = binding.split(format!("{}:", module_path).as_str()).last();
         match res {
-            Some(s) => match (record.file(), record.line(), record.module_path()) {
-                (Some(f), Some(l), Some(m)) => {
+            Some(s) => match (record.line(), record.module_path()) {
+                (Some(l), Some(m)) => {
                     console::log_1(&JsString::from(format!(
-                        "<font color={color}>{}</font> {m}/{f}:{l}{s}",
+                        "<font color={color}>{}</font> {m}:{l}{s}",
                         record.level()
                     )));
                 }
